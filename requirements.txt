@@ -1,0 +1,7 @@
+wyoming>=1.0.0
+torch>=2.0.0
+torchaudio>=2.0.0
+numpy
+soundfile
+scipy
+omegaconf

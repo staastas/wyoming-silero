@@ -1,0 +1,24 @@
+---
+services:
+  wyoming-silero:
+    image: ghcr.io/staastas/wyoming-silero:latest
+    container_name: wyoming-silero
+    restart: unless-stopped
+    ports:
+      - "10200:10200"
+    environment:
+      # Silero TTS Configuration
+      SILERO_LANGUAGE: "ru"       # Internal code (ru, en, de, ua, etc.)
+      SILERO_MODEL: "v5_1_ru"     # Model name
+      SILERO_SPEAKER: "kseniya"   # Default speaker
+      SILERO_SAMPLE_RATE: "48000" # Sample rate
+      # Global SSML Configuration (optional)
+      # SILERO_PROSODY_RATE: "medium"    # Speech rate: x-slow, slow, medium, fast, x-fast
+      # SILERO_PROSODY_PITCH: "medium"   # Pitch: x-low, low, medium, high, x-high
+      # SILERO_BREAK_TIME: ""            # Pause duration (e.g., "500ms", "1s")
+      # SILERO_BREAK_STRENGTH: ""        # Pause strength: x-weak, weak, medium, strong, x-strong
+      # Wyoming Server Configuration
+      WYOMING_PORT: "10200"    # Port
+      # WYOMING_DEBUG: "true"  # Uncomment for debug logging
+    volumes:
+      - ./silero-models:/app/silero/model  # Persist models and config
