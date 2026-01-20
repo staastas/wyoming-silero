@@ -5,3 +5,4 @@ numpy
 soundfile
 scipy
 omegaconf
+num2words

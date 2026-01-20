@@ -15,6 +15,7 @@ from wyoming.info import Attribution, Info, TtsProgram, TtsVoice
 from wyoming.server import AsyncServer
 
 from .handler import SileroEventHandler
+from .loader import load_silero_model
 from . import __version__
 
 _LOGGER = logging.getLogger(__name__)
@@ -66,9 +67,6 @@ async def main() -> None:
     _LOGGER.info("="*60)
     _LOGGER.info("📦 Loading model...")
 
-
-    from .loader import load_silero_model
-
     silero_lang = args.language
     if args.model == 'multi_v2':
         silero_lang = 'multi'
@@ -83,49 +81,19 @@ async def main() -> None:
         _LOGGER.error(f"Failed to load model: {e}")
         sys.exit(1)
 
-
-
-    synthesize_fn = None
-    sample_rate = args.sample_rate
-
     if hasattr(model, 'apply_tts'):
-         _LOGGER.debug(f"Model loaded successfully. Attributes: {dir(model)}")
-
-         if hasattr(model, 'speakers'):
-             model.speakers = list(model.speakers)
-             _LOGGER.info(f"Available speakers: {model.speakers}")
-             if args.speaker is None:
-                 args.speaker = model.speakers[0]
-                 _LOGGER.info(f"No speaker specified, using first available: '{args.speaker}'")
-             elif args.speaker not in model.speakers:
-                 _LOGGER.warning(f"Speaker '{args.speaker}' not found in model speakers: {model.speakers}")
-                 if model.speakers:
-                     args.speaker = model.speakers[0]
-                     _LOGGER.warning(f"Falling back to speaker '{args.speaker}'")
-
-         def wrapper(text, speaker=None):
-             effective_speaker = speaker if speaker else args.speaker
-             if hasattr(model, 'speakers') and effective_speaker not in model.speakers:
-                 _LOGGER.warning(f"Requested speaker '{effective_speaker}' not found during synthesis.")
-                 effective_speaker = args.speaker
-
-             _LOGGER.info(f"🎙️  Synthesizing with speaker='{effective_speaker}'")
-             try:
-                 is_ssml = text.strip().startswith('<speak>')
-
-                 if is_ssml:
-                     _LOGGER.debug("🔖 Using SSML synthesis")
-                     ret = model.apply_tts(ssml_text=text, speaker=effective_speaker, sample_rate=sample_rate)
-                 else:
-                     _LOGGER.debug("📝 Using plain text synthesis")
-                     ret = model.apply_tts(text=text, speaker=effective_speaker, sample_rate=sample_rate)
-                 return ret.cpu()
-             except Exception as e:
-                 _LOGGER.error(f"Synthesis failed: {e}")
-                 raise e
-
-         synthesize_fn = wrapper
-
+        _LOGGER.debug(f"Model loaded successfully. Attributes: {dir(model)}")
+        if hasattr(model, 'speakers'):
+            model.speakers = list(model.speakers)
+            _LOGGER.info(f"Available speakers: {model.speakers}")
+            if args.speaker is None:
+                args.speaker = model.speakers[0]
+                _LOGGER.info(f"No speaker specified, using first available: '{args.speaker}'")
+            elif args.speaker not in model.speakers:
+                _LOGGER.warning(f"Speaker '{args.speaker}' not found in model speakers: {model.speakers}")
+                if model.speakers:
+                    args.speaker = model.speakers[0]
+                    _LOGGER.warning(f"Falling back to default speaker '{args.speaker}'")
     else:
         _LOGGER.error("Loaded model does not support 'apply_tts'. Is this an old JIT model? Only new .pt models are supported.")
         sys.exit(1)
@@ -185,9 +153,9 @@ async def main() -> None:
             wyoming_info,
             args,
             model,
-            synthesize_fn,
-            sample_rate,
-            args.speaker
+            args.sample_rate,
+            args.speaker,
+            ha_language
         )
     )
 
