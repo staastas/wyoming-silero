@@ -1,26 +1,80 @@
 import asyncio
+import inspect
 import logging
 import math
 import re
 import time
-from typing import Any, Dict, Optional
+from typing import Any, Optional
+
 import torch
 from num2words import num2words
 
 from wyoming.audio import AudioChunk, AudioStart, AudioStop
+from wyoming.error import Error
 from wyoming.event import Event
 from wyoming.info import Describe, Info
 from wyoming.server import AsyncEventHandler
-from wyoming.tts import Synthesize
+from wyoming.tts import Synthesize, SynthesizeTextFormat
 
 _LOGGER = logging.getLogger(__name__)
 
-# Compile regex patterns once
 TIME_PATTERN = re.compile(r'(\d{1,2}):(\d{2})')
-NUMBER_PATTERN = re.compile(r'-?\d+(?:[.,]\d+)?')
 
-def _get_russian_declension(number: int, one: str, two: str, five: str) -> str:
-    """Get the proper declension for Russian numbers."""
+# A number is only matched when it is not glued to a word character or to
+# another number group. This keeps "A-1" from reading as a negative number and
+# leaves dotted groups such as IP addresses and versions ("192.168.1.1") alone,
+# while still matching "-3.5" and the European "1,5".
+NUMBER_PATTERN = re.compile(r'(?<![\w.,])-?\d+(?:[.,]\d+)?(?!\d|[.,]\d)')
+
+# Used to normalize only the text nodes of an SSML document, never the markup.
+TAG_PATTERN = re.compile(r'<[^>]*>')
+
+# Slavic languages inflect the unit noun, and some units are feminine, which
+# also changes the numeral itself ("одна минута", not "один минута").
+_SLAVIC_TIME_FORMS = {
+    'ru': {
+        'hour': (('час', 'часа', 'часов'), None),
+        'minute': (('минута', 'минуты', 'минут'), 'f'),
+    },
+    'uk': {
+        'hour': (('година', 'години', 'годин'), 'f'),
+        'minute': (('хвилина', 'хвилини', 'хвилин'), 'f'),
+    },
+}
+
+# Languages that pluralize the unit noun. Each entry is
+# (singular, plural, gender of the noun).
+_PLURAL_TIME_FORMS = {
+    'en': {
+        'hour': ('hour', 'hours', None),
+        'minute': ('minute', 'minutes', None),
+    },
+    'es': {
+        'hour': ('hora', 'horas', 'f'),
+        'minute': ('minuto', 'minutos', 'm'),
+    },
+    'fr': {
+        'hour': ('heure', 'heures', 'f'),
+        'minute': ('minute', 'minutes', 'f'),
+    },
+}
+
+# Numerals that change shape in front of a unit noun, as
+# (last digit, form produced by num2words, form required here).
+_NUMERAL_FORMS = {
+    'ru': {'f': ((1, 'один', 'одна'), (2, 'два', 'две'))},
+    'uk': {'f': ((1, 'один', 'одна'), (2, 'два', 'дві'))},
+    'es': {
+        'f': ((1, 'veintiuno', 'veintiuna'), (1, 'uno', 'una')),
+        'm': ((1, 'veintiuno', 'veintiún'), (1, 'uno', 'un')),
+    },
+    'fr': {'f': ((1, 'un', 'une'),)},
+    'de': {None: ((1, 'eins', 'ein'),)},
+}
+
+
+def _get_slavic_declension(number: int, one: str, two: str, five: str) -> str:
+    """Get the proper declension for Slavic numbers."""
     if number % 10 == 1 and number % 100 != 11:
         return one
     elif 2 <= number % 10 <= 4 and (number % 100 < 10 or number % 100 >= 20):
@@ -29,53 +83,83 @@ def _get_russian_declension(number: int, one: str, two: str, five: str) -> str:
         return five
 
 
+def _apply_numeral_form(word: str, number: int, lang: str, gender) -> str:
+    """Adapt a numeral to the gender the unit noun requires."""
+    for digit, source, target in _NUMERAL_FORMS.get(lang, {}).get(gender, ()):
+        # The teens keep the plain form: "одиннадцать минут", not "одна...".
+        if number % 10 == digit and number % 100 != 10 + digit and word.endswith(source):
+            return word[: -len(source)] + target
+    return word
+
+
 def _format_time(hours: int, minutes: int, lang: str) -> str:
-    """Format time with proper declensions."""
-    if lang == 'ru':
-        # Convert numbers to words
-        hours_word = num2words(hours, lang='ru')
+    """
+    Format a time of day in the given language.
 
-        # Get proper declension for hours
-        hours_text = f"{hours_word} {_get_russian_declension(hours, 'час', 'часа', 'часов')}"
+    Raises ValueError when the language has no rules, so the caller can fall
+    back instead of emitting English unit names inside a non-English sentence.
+    """
+    if lang in _SLAVIC_TIME_FORMS:
+        forms = _SLAVIC_TIME_FORMS[lang]
 
-        # Handle minutes
+        hour_forms, hour_gender = forms['hour']
+        hours_word = _apply_numeral_form(num2words(hours, lang=lang), hours, lang, hour_gender)
+        hours_text = f"{hours_word} {_get_slavic_declension(hours, *hour_forms)}"
+
         if minutes == 0:
             return hours_text
-        else:
-            minutes_word = num2words(minutes, lang='ru')
-            # Fix gender for minutes (feminine)
-            # один -> одна (1, 21, 31, 41, 51)
-            if minutes % 10 == 1 and minutes % 100 != 11:
-                    minutes_word = re.sub(r'один$', 'одна', minutes_word)
-            # два -> две (2, 22, 32, 42, 52)
-            elif minutes % 10 == 2 and minutes % 100 != 12:
-                    minutes_word = re.sub(r'два$', 'две', minutes_word)
 
-            minutes_text = f"{minutes_word} {_get_russian_declension(minutes, 'минута', 'минуты', 'минут')}"
-            return f"{hours_text} {minutes_text}"
+        minute_forms, minute_gender = forms['minute']
+        minutes_word = _apply_numeral_form(num2words(minutes, lang=lang), minutes, lang, minute_gender)
+        minutes_text = f"{minutes_word} {_get_slavic_declension(minutes, *minute_forms)}"
+        return f"{hours_text} {minutes_text}"
 
-    elif lang == 'uk':  # Ukrainian
-        hours_word = num2words(hours, lang='uk')
+    if lang == 'de':
+        # German reads 8:45 as "acht Uhr fünfundvierzig".
+        hours_word = _apply_numeral_form(num2words(hours, lang='de'), hours, 'de', None)
+        if minutes == 0:
+            return f"{hours_word} Uhr"
+        return f"{hours_word} Uhr {num2words(minutes, lang='de')}"
+
+    if lang in _PLURAL_TIME_FORMS:
+        forms = _PLURAL_TIME_FORMS[lang]
+
+        hour_one, hour_many, hour_gender = forms['hour']
+        hours_word = _apply_numeral_form(num2words(hours, lang=lang), hours, lang, hour_gender)
+        hours_text = f"{hours_word} {hour_one if hours == 1 else hour_many}"
 
         if minutes == 0:
-            hours_text = f"{hours_word} {_get_russian_declension(hours, 'година', 'години', 'годин')}"
             return hours_text
-        else:
-            minutes_word = num2words(minutes, lang='uk')
-            hours_text = f"{hours_word} {_get_russian_declension(hours, 'година', 'години', 'годин')}"
-            minutes_text = f"{minutes_word} {_get_russian_declension(minutes, 'хвилина', 'хвилини', 'хвилин')}"
-            return f"{hours_text} {minutes_text}"
 
-    else:  # English and other languages
-        hours_word = num2words(hours, lang=lang)
-        hour_unit = "hour" if hours == 1 else "hours"
+        minute_one, minute_many, minute_gender = forms['minute']
+        minutes_word = _apply_numeral_form(num2words(minutes, lang=lang), minutes, lang, minute_gender)
+        minutes_text = f"{minutes_word} {minute_one if minutes == 1 else minute_many}"
+        return f"{hours_text} {minutes_text}"
 
-        if minutes == 0:
-            return f"{hours_word} {hour_unit}"
-        else:
-            minutes_word = num2words(minutes, lang=lang)
-            minute_unit = "minute" if minutes == 1 else "minutes"
-            return f"{hours_word} {hour_unit} {minutes_word} {minute_unit}"
+    raise ValueError(f"No time formatting rules for language '{lang}'")
+
+
+def resolve_tts_api(model: Any) -> tuple:
+    """
+    Work out how this model's apply_tts wants to be called.
+
+    v3+ models take (text, speaker) and accept ssml_text; multi_v2 takes
+    (texts, speakers) and has no SSML support at all.
+    """
+    try:
+        params = inspect.signature(model.apply_tts).parameters
+    except (TypeError, ValueError):
+        params = {}
+
+    text_arg = 'texts' if 'texts' in params and 'text' not in params else 'text'
+    speaker_arg = 'speakers' if 'speakers' in params and 'speaker' not in params else 'speaker'
+    supports_ssml = 'ssml_text' in params
+    return text_arg, speaker_arg, supports_ssml
+
+
+def _escape_ssml_text(text: str) -> str:
+    """Escape characters that would otherwise make the SSML document invalid."""
+    return text.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
 
 
 class SileroEventHandler(AsyncEventHandler):
@@ -86,6 +170,7 @@ class SileroEventHandler(AsyncEventHandler):
         model: Any,
         sample_rate: int,
         speaker: str,
+        speakers: list,
         language: str,
         *args,
         **kwargs,
@@ -96,7 +181,10 @@ class SileroEventHandler(AsyncEventHandler):
         self.model = model
         self.sample_rate = sample_rate
         self.speaker = speaker
+        self.speakers = list(speakers or [])
         self.language = language
+
+        self.text_arg, self.speaker_arg, self.supports_ssml = resolve_tts_api(model)
 
         # Global SSML parameters
         self.prosody_rate = getattr(cli_args, 'prosody_rate', None)
@@ -114,7 +202,7 @@ class SileroEventHandler(AsyncEventHandler):
             start_time = time.time()
 
             synthesize = Synthesize.from_event(event)
-            text = synthesize.text
+            text = synthesize.text or ""
 
             # Extract requested speaker from voice.name if present
             requested_speaker = None
@@ -124,18 +212,48 @@ class SileroEventHandler(AsyncEventHandler):
             _LOGGER.info("📝 Synthesis request: text='%s'... (len=%d), requested_speaker='%s', default_speaker='%s'",
                         text[:50], len(text), requested_speaker, self.speaker)
 
+            if not text.strip():
+                _LOGGER.warning("⚠️  Empty synthesis request, returning no audio")
+                await self._write_empty_audio()
+                return True
+
+            # Honour the client's declared format, falling back to sniffing the
+            # <speak> root for clients that do not send text_format.
+            is_ssml = (
+                synthesize.text_format == SynthesizeTextFormat.SSML
+                or text.strip().startswith('<speak>')
+            )
+
+            if is_ssml and not self.supports_ssml:
+                # The model cannot parse SSML, so read out the text nodes
+                # rather than failing the whole request.
+                _LOGGER.warning("⚠️  Model does not support SSML; stripping markup from request")
+                text = TAG_PATTERN.sub('', text)
+                is_ssml = False
+
             # Normalize numbers to words before SSML wrapping
-            text = self._normalize_numbers(text)
+            text = self._normalize_numbers(text, is_ssml=is_ssml)
 
             # Apply global SSML wrapping if configured
-            text = self._wrap_with_ssml(text)
+            text, is_ssml = self._wrap_with_ssml(text, is_ssml)
 
             # Run synthesis in executor to avoid blocking the loop
             _LOGGER.info("🎤 Starting synthesis...")
             synthesis_start = time.time()
-            audio_tensor = await asyncio.get_event_loop().run_in_executor(
-                None, self._synthesize, text, requested_speaker
-            )
+            try:
+                audio_tensor = await asyncio.get_event_loop().run_in_executor(
+                    None, self._synthesize, text, requested_speaker, is_ssml
+                )
+            except Exception as err:
+                _LOGGER.exception("❌ Synthesis failed after %.2f seconds", time.time() - synthesis_start)
+                await self.write_event(
+                    Error(text=f"Silero synthesis failed: {err}", code="synthesis_failed").event()
+                )
+                # Still close the audio stream so clients that ignore Error do
+                # not wait forever for an AudioStop.
+                await self._write_empty_audio()
+                return True
+
             synthesis_time = time.time() - synthesis_start
             _LOGGER.info("✅ Synthesis completed in %.2f seconds", synthesis_time)
 
@@ -185,16 +303,54 @@ class SileroEventHandler(AsyncEventHandler):
 
         return True
 
-    def _normalize_numbers(self, text: str) -> str:
+    async def _write_empty_audio(self) -> None:
+        """Open and immediately close an audio stream, so the client can finish."""
+        await self.write_event(
+            AudioStart(rate=self.sample_rate, width=2, channels=1).event()
+        )
+        await self.write_event(AudioStop().event())
+
+    def _normalize_numbers(self, text: str, is_ssml: bool = False) -> str:
         """Convert digits in text to words using num2words."""
         original_text = text
+
+        if is_ssml:
+            # Rewrite text nodes only; touching markup would corrupt attributes
+            # such as <break time="500ms"/>.
+            pieces = []
+            position = 0
+            for tag in TAG_PATTERN.finditer(text):
+                pieces.append(self._normalize_text_node(text[position:tag.start()]))
+                pieces.append(tag.group(0))
+                position = tag.end()
+            pieces.append(self._normalize_text_node(text[position:]))
+            normalized_text = ''.join(pieces)
+        else:
+            normalized_text = self._normalize_text_node(text)
+
+        if original_text != normalized_text:
+            _LOGGER.info("📊 Normalized text: '%s' -> '%s'",
+                        original_text[:50] + ('...' if len(original_text) > 50 else ''),
+                        normalized_text[:50] + ('...' if len(normalized_text) > 50 else ''))
+
+        return normalized_text
+
+    def _normalize_text_node(self, text: str) -> str:
+        """Convert times and numbers inside a single run of plain text."""
+        if not text:
+            return text
+
         num2words_lang = self.language
 
         def replace_time(match):
             """Replace time format with natural language."""
+            hours = int(match.group(1))
+            minutes = int(match.group(2))
+            if hours > 23 or minutes > 59:
+                # Not a time of day (a ratio or a score), leave it to the
+                # number pass.
+                return match.group(0)
             try:
-                hours = int(match.group(1))
-                minutes = int(match.group(2))
                 return _format_time(hours, minutes, num2words_lang)
             except Exception as e:
                 _LOGGER.warning("⚠️  Failed to format time '%s': %s. Using fallback.", match.group(0), e)
@@ -221,29 +377,29 @@ class SileroEventHandler(AsyncEventHandler):
                 return number_str
 
         # Replace all numbers in the text
-        normalized_text = NUMBER_PATTERN.sub(replace_number, text)
+        return NUMBER_PATTERN.sub(replace_number, text)
 
-        if original_text != normalized_text:
-            _LOGGER.info("📊 Normalized text: '%s' -> '%s'",
-                        original_text[:50] + ('...' if len(original_text) > 50 else ''),
-                        normalized_text[:50] + ('...' if len(normalized_text) > 50 else ''))
-
-        return normalized_text
-
-    def _wrap_with_ssml(self, text: str) -> str:
+    def _wrap_with_ssml(self, text: str, is_ssml: bool = False) -> tuple:
         """Wrap text with global SSML tags if configured."""
         if not (self.prosody_rate or self.prosody_pitch or self.break_time or self.break_strength):
-            return text
+            return text, is_ssml
 
-        text_stripped = text.strip()
-        has_ssml = text_stripped.startswith('<speak>') and text_stripped.endswith('</speak>')
+        if not self.supports_ssml:
+            _LOGGER.warning("⚠️  Global SSML parameters are set but this model does not support SSML; ignoring them")
+            return text, is_ssml
 
-        if has_ssml:
-            # Remove outer <speak> tags
-            inner_content = text_stripped[7:-8].strip()
+        if is_ssml:
+            # Keep the caller's markup, drop only the outer <speak> element.
+            text_stripped = text.strip()
+            if text_stripped.startswith('<speak>') and text_stripped.endswith('</speak>'):
+                inner_content = text_stripped[7:-8].strip()
+            else:
+                inner_content = text_stripped
             _LOGGER.debug("📋 Detected existing SSML, wrapping with global parameters")
         else:
-            inner_content = text
+            # Plain text becomes an SSML text node, so it has to be escaped or
+            # characters like '<' and '&' make the document invalid.
+            inner_content = _escape_ssml_text(text)
             _LOGGER.debug("📋 Plain text detected, applying global SSML parameters")
 
         wrapped = inner_content
@@ -271,34 +427,35 @@ class SileroEventHandler(AsyncEventHandler):
             _LOGGER.debug("📋 Applied global break: %s", break_tag)
 
         # Wrap in <speak> tags
-        result = f'<speak>{wrapped}</speak>'
-        return result
+        return f'<speak>{wrapped}</speak>', True
 
-    def _synthesize(self, text: str, speaker: Optional[str] = None):
-        """Synthesize text using the loaded model."""
+    def _synthesize(self, text: str, speaker: Optional[str] = None, is_ssml: bool = False):
+        """Synthesize text using the loaded model. Raises on failure."""
         effective_speaker = speaker if speaker else self.speaker
 
         # Fallback if speaker invalid
-        if hasattr(self.model, 'speakers') and effective_speaker not in self.model.speakers:
-             _LOGGER.warning("Requested speaker '%s' not found. Falling back to default '%s'",
-                             effective_speaker, self.speaker)
-             effective_speaker = self.speaker
+        if self.speakers and effective_speaker not in self.speakers:
+            _LOGGER.warning("Requested speaker '%s' not found. Falling back to default '%s'",
+                            effective_speaker, self.speaker)
+            effective_speaker = self.speaker
 
         _LOGGER.debug("🔧 _synthesize called with speaker='%s'", effective_speaker)
 
-        try:
-             is_ssml = text.strip().startswith('<speak>')
-             if is_ssml:
-                 _LOGGER.debug("🔖 Using SSML synthesis")
-                 audio = self.model.apply_tts(ssml_text=text, speaker=effective_speaker, sample_rate=self.sample_rate)
-             else:
-                 _LOGGER.debug("📝 Using plain text synthesis")
-                 audio = self.model.apply_tts(text=text, speaker=effective_speaker, sample_rate=self.sample_rate)
+        kwargs = {self.speaker_arg: effective_speaker, "sample_rate": self.sample_rate}
+        if is_ssml:
+            _LOGGER.debug("🔖 Using SSML synthesis")
+            kwargs["ssml_text"] = text
+        else:
+            _LOGGER.debug("📝 Using plain text synthesis")
+            kwargs[self.text_arg] = text
 
-             return audio.cpu()
+        audio = self.model.apply_tts(**kwargs)
 
-        except Exception as e:
-            _LOGGER.error("Synthesis failed: %s", e)
-             # Return silent audio on error to avoid crashing
-            return torch.zeros(0)
+        # Batch-oriented models (multi_v2) return a list of tensors, one per
+        # input text, rather than a single waveform.
+        if isinstance(audio, (list, tuple)):
+            if not audio:
+                raise ValueError("Model returned no audio")
+            audio = audio[0] if len(audio) == 1 else torch.cat([part.reshape(-1) for part in audio])
 
+        return audio.cpu()

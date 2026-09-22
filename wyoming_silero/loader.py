@@ -1,7 +1,7 @@
 
 import os
 import logging
-from typing import Any
+from typing import Any, Tuple
 
 import torch
 from omegaconf import OmegaConf
@@ -12,10 +12,13 @@ def load_silero_model(
     language: str,
     model_name: str,
     download_path: str,
-) -> Any:
+) -> Tuple[Any, Any]:
     """
     Load a Silero TTS model (v3+ .pt format).
     Downloads models.yml and the model itself if needed.
+
+    Returns the model and its models.yml entry, which carries the supported
+    sample rates and, for multi-speaker models, the per-speaker languages.
     """
 
     # 1. Download or load models.yml
@@ -46,9 +49,15 @@ def load_silero_model(
 
     model_info = lang_conf[model_name].latest
 
-    model_url = model_info.package
+    model_url = model_info.get("package")
     if not model_url:
-        raise ValueError(f"Model '{model_name}' (latest) does not have a 'package' url (likely a JIT model which is not supported).")
+        raise ValueError(f"Model '{model_name}' (latest) does not have a 'package' url.")
+
+    if model_url.endswith(".jit"):
+        raise ValueError(
+            f"Model '{model_name}' is a TorchScript (.jit) package, which this server does not support. "
+            f"Pick a model whose package is a '.pt' file."
+        )
 
     model_filename = os.path.basename(model_url)
     model_file_path = os.path.join(download_path, model_filename)
@@ -66,4 +75,4 @@ def load_silero_model(
     device = torch.device("cpu")
     model.to(device)
 
-    return model
+    return model, model_info

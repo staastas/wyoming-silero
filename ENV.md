@@ -22,6 +22,7 @@ This file documents all available environment variables for configuring Wyoming 
   - Ukrainian: `v4_ua`, `v3_ua`
   - Multi-language: `multi_v2`
 - **Example**: `SILERO_MODEL=v5_1_ru`
+- **Note**: `multi_v2` is an older model: it runs at 8000/16000 Hz and has no SSML support, so the global SSML settings below are ignored for it. Models whose package is a `.jit` file (e.g. `v5_cis_base_nostress_jit`) are not supported.
 
 ### SILERO_SPEAKER
 - **Description**: Default speaker/voice name
@@ -36,10 +37,19 @@ This file documents all available environment variables for configuring Wyoming 
 - **Default**: `48000`
 - **Options**: `8000`, `16000`, `24000`, `48000` (depends on model)
 - **Example**: `SILERO_SAMPLE_RATE=48000`
+- **Note**: The value is checked against the rates the chosen model declares in `models.yml`. If it is unsupported, the server logs a warning and uses the highest supported rate instead (e.g. `multi_v2` only accepts `8000` and `16000`).
+
+### SILERO_HA_LANGUAGE
+- **Description**: Override the ISO-639-1 language code advertised to Home Assistant
+- **Default**: Derived from `SILERO_LANGUAGE` (`ua` maps to `uk`), or per voice from the speaker name / `models.yml`
+- **When to use**: Umbrella models such as `multi_v2`, `v4_cyrillic` and `v4_indic` are not single-language. By default each voice is advertised with the language taken from `models.yml` or from its name prefix (`bel_larisa` becomes `be`). Set this to force one language for every voice.
+- **Example**: `SILERO_HA_LANGUAGE=ru`
 
 ## Global SSML Configuration
 
 These parameters allow you to apply SSML prosody and break tags to all synthesized text automatically. They are optional and can be combined.
+
+They require a model with SSML support (v3 and newer). On a model without it, the server logs a warning at startup and ignores them.
 
 ### SILERO_PROSODY_RATE
 - **Description**: Global speech rate for all synthesis
@@ -126,8 +136,9 @@ environment:
   SILERO_LANGUAGE: "multi"
   SILERO_MODEL: "multi_v2"
   SILERO_SPEAKER: "aidar"
-  SILERO_SAMPLE_RATE: "16000"
+  SILERO_SAMPLE_RATE: "16000"   # multi_v2 supports 8000 and 16000 only
 ```
+Each voice is advertised with its own language from `models.yml`. Add `SILERO_HA_LANGUAGE` to force a single language instead.
 
 ### Debug Mode
 ```yaml

@@ -85,11 +85,16 @@ Models are dynamically defined in the upstream [models.yml](https://github.com/s
 - **German (`de`)**: `v3_de`
 - **Ukrainian (`ua`)**: `v4_ua` (Advertised as `uk` to Home Assistant)
 - **CIS Multi (`multi`)**: `v5_cis_base` (Supports `bel`, `ru`, `ua` voices)
+- **Legacy multi-language (`multi`)**: `multi_v2` (16 kHz, no SSML; each voice is advertised with its own language)
+
+Models distributed as `.jit` packages are rejected at startup with a clear message.
 
 ## Troubleshooting
 
 - **No Voices in Home Assistant**: Use `Reload` on the Wyoming integration or delete and re-add it. Home Assistant caches device configurations aggressively.
 - **Offline Mode**: Ensure the first run has internet access to populate the `silero-models` volume. Subsequent runs can operate offline using cached files.
+- **Unsupported Sample Rate**: The server checks `SILERO_SAMPLE_RATE` against the rates the model declares and falls back to the highest supported one, logging a warning.
+- **Synthesis Errors**: Failures are reported to the client as a Wyoming `Error` event and logged with a traceback, instead of silently returning empty audio.
 
 ## Credits
 

@@ -7,7 +7,7 @@ setup(
     author="staastas",
     packages=find_packages(),
     install_requires=[
-        "wyoming>=1.0.0",
+        "wyoming>=1.10.0",
         "torch>=2.0.0",
         "torchaudio>=2.0.0",
         "numpy",
@@ -15,6 +15,7 @@ setup(
         "scipy",
         "omegaconf",
         "PyYAML",
+        "num2words",
     ],
     entry_points={
         "console_scripts": [
