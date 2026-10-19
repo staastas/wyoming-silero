@@ -1,11 +1,12 @@
 
 import asyncio
 import json
+import sys
 from wyoming.client import AsyncClient
 from wyoming.info import Describe, Info
 
 async def main():
-    uri = "tcp://0.0.0.0:10200"
+    uri = sys.argv[1] if len(sys.argv) > 1 else "tcp://127.0.0.1:10200"
     print(f"Connecting to {uri}...")
     try:
         async with AsyncClient.from_uri(uri) as client:

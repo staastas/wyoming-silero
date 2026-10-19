@@ -12,6 +12,8 @@ This server integrates [Silero TTS](https://github.com/snakers4/silero-models) w
 - 📦 **Dynamic Model Loading**: Automatically downloads the latest `models.yml` configuration and models from the official Silero repository.
 - 🧱 **Multi-Container Support**: Runs as a unique service per language (e.g., `silero-ru`, `silero-de`), allowing multiple instances on the same host.
 - 🚀 **CPU Optimized**: The Docker image is optimized for performance on CPU, using a specific CPU-only build of PyTorch.
+- ⚡ **Streaming Synthesis**: Supports Wyoming text streaming, so Home Assistant starts speaking an LLM answer while it is still being generated. Long texts are split into sentences, so they never hit Silero's input length limit.
+- 📡 **Optional Zeroconf Discovery**: Can announce itself to Home Assistant over mDNS (host networking only).
 
 ## Quick Start
 
@@ -19,7 +21,7 @@ This server integrates [Silero TTS](https://github.com/snakers4/silero-models) w
 
 1. Configure `docker-compose.yaml`.
 
-   **Note**: The server requires **Internet Access** for the first run to download the model configuration and the selected model. These are persisted in the `silero-models` volume.
+   **Note**: The server requires **Internet Access** for the first run to download the model configuration and the selected model. They are stored in the `./silero-models` directory, which the container makes writable for its own user on start.
 
 ```yaml
 services:
@@ -51,6 +53,15 @@ services:
 ```bash
 docker-compose up -d
 ```
+
+3. In Home Assistant, go to **Settings → Devices & services → Add integration → Wyoming Protocol** and enter the host's IP address and port `10200`.
+
+### Automatic Discovery (optional)
+
+With `WYOMING_ZEROCONF: "true"` the server announces itself over mDNS and Home Assistant offers to add it under **Discovered**.
+mDNS does not cross a Docker bridge network, so this only works with `network_mode: host` (then drop the `ports:` section). With the default bridge network nothing breaks: discovery simply does not happen and you add the integration manually as above.
+
+If the host has several network interfaces, set `WYOMING_ZEROCONF_HOST` to the IP Home Assistant should connect to.
 
 ### Running Multiple Languages
 
@@ -94,7 +105,10 @@ Models distributed as `.jit` packages are rejected at startup with a clear messa
 - **No Voices in Home Assistant**: Use `Reload` on the Wyoming integration or delete and re-add it. Home Assistant caches device configurations aggressively.
 - **Offline Mode**: Ensure the first run has internet access to populate the `silero-models` volume. Subsequent runs can operate offline using cached files.
 - **Unsupported Sample Rate**: The server checks `SILERO_SAMPLE_RATE` against the rates the model declares and falls back to the highest supported one, logging a warning.
-- **Synthesis Errors**: Failures are reported to the client as a Wyoming `Error` event and logged with a traceback, instead of silently returning empty audio.
+- **Synthesis Errors**: A sentence that fails is logged with a traceback and skipped, so the rest of the answer is still spoken. If nothing could be synthesized, the client gets a Wyoming `Error` event instead of silent audio.
+- **Permission denied in the models directory**: The container fixes the ownership of `./silero-models` on start. If you run it with an explicit `user:`, make sure that user can write to the directory.
+- **Long SSML documents**: Plain text is split into sentences automatically, but SSML is sent to the model as a whole and must stay within Silero's length limit.
+- **Health check**: `docker ps` shows the container as `healthy` once it answers a Wyoming `Describe` request. The first start can take a few minutes while the model downloads.
 
 ## Credits
 

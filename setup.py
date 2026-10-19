@@ -2,7 +2,7 @@ from setuptools import setup, find_packages
 
 setup(
     name="wyoming-silero",
-    version="1.0.0",
+    version="1.1.0",
     description="Wyoming Server for Silero TTS",
     author="staastas",
     packages=find_packages(),
@@ -16,6 +16,7 @@ setup(
         "omegaconf",
         "PyYAML",
         "num2words",
+        "zeroconf",
     ],
     entry_points={
         "console_scripts": [

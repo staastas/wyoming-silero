@@ -8,3 +8,6 @@ __pycache__/
 LICENSE
 *.md
 silero/model/
+tests/
+pytest.ini
+requirements-dev.txt

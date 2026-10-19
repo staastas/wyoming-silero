@@ -5,17 +5,20 @@ import logging
 from functools import partial
 import sys
 import os
+from urllib.parse import urlparse
 
 # Suppress TypedStorage deprecation warning from torch.package
 import warnings
 warnings.filterwarnings('ignore', message='TypedStorage is deprecated')
 warnings.filterwarnings('ignore', category=SyntaxWarning)
 
+import torch
 from wyoming.info import Attribution, Info, TtsProgram, TtsVoice
 from wyoming.server import AsyncServer
 
 from .handler import SileroEventHandler, resolve_tts_api
 from .loader import load_silero_model
+from .text import DEFAULT_MAX_CHARS, parse_break_ms
 from . import __version__
 
 _LOGGER = logging.getLogger(__name__)
@@ -32,6 +35,25 @@ SPEAKER_PREFIX_TO_LANG = {
     "ru": "ru", "bel": "be", "ua": "uk", "uz": "uz", "tt": "tt",
     "xal": "xal", "ba": "ba", "en": "en", "de": "de", "es": "es", "fr": "fr",
 }
+
+# v3/v4 models offer a "random" speaker that sounds different on every call,
+# which makes no sense as a voice to pick in Home Assistant.
+HIDDEN_SPEAKERS = {"random"}
+
+
+def _env_flag(name: str) -> bool:
+    return os.getenv(name, "false").strip().lower() in ("1", "true", "yes", "on")
+
+
+def describe_voice(speaker_name: str, language: str) -> str:
+    """Build a readable voice label, e.g. "bel_larisa" -> "Larisa (be)"."""
+    prefix, _, rest = speaker_name.partition("_")
+    if rest.isdigit():
+        # Numbered speakers ("en_12") have no name to tidy up.
+        return f"{speaker_name} ({language})"
+    if rest and prefix in SPEAKER_PREFIX_TO_LANG:
+        speaker_name = rest
+    return f"{speaker_name.replace('_', ' ').title()} ({language})"
 
 
 def _supported_sample_rates(model_info) -> list:
@@ -102,13 +124,35 @@ async def main() -> None:
     parser.add_argument("--break-time", default=os.getenv("SILERO_BREAK_TIME"), help="Global break time (e.g., 500ms, 1s)")
     parser.add_argument("--break-strength", default=os.getenv("SILERO_BREAK_STRENGTH"), help="Global break strength (x-weak, weak, medium, strong, x-strong)")
 
-    parser.add_argument("--debug", action="store_true", default=os.getenv("WYOMING_DEBUG", "false").lower() == "true", help="Log DEBUG messages")
+    parser.add_argument("--max-chars", type=int, default=int(os.getenv("SILERO_MAX_CHARS", str(DEFAULT_MAX_CHARS))), help="Longest piece of text sent to the model at once")
+    parser.add_argument("--threads", type=int, default=int(os.getenv("SILERO_THREADS", "0")), help="CPU threads used by torch (0 = torch default)")
+    parser.add_argument("--offline", action="store_true", default=_env_flag("SILERO_OFFLINE"), help="Do not download models.yml when a cached copy exists")
+
+    # Zeroconf discovery (needs host networking to reach Home Assistant)
+    parser.add_argument("--zeroconf", action="store_true", default=_env_flag("WYOMING_ZEROCONF"), help="Announce the server to Home Assistant over mDNS")
+    parser.add_argument("--zeroconf-name", default=os.getenv("WYOMING_ZEROCONF_NAME"), help="Service name announced over mDNS")
+    parser.add_argument("--zeroconf-host", default=os.getenv("WYOMING_ZEROCONF_HOST"), help="IP address announced over mDNS (auto-detected by default)")
+
+    parser.add_argument("--debug", action="store_true", default=_env_flag("WYOMING_DEBUG"), help="Log DEBUG messages")
 
     args = parser.parse_args()
     logging.basicConfig(level=logging.DEBUG if args.debug else logging.INFO)
 
     if not args.uri:
         args.uri = f"tcp://{args.host}:{args.port}"
+
+    try:
+        args.break_ms = parse_break_ms(args.break_time, args.break_strength)
+    except ValueError as e:
+        _LOGGER.error("%s", e)
+        sys.exit(1)
+
+    if args.max_chars < 50:
+        _LOGGER.error("SILERO_MAX_CHARS must be at least 50, got %d", args.max_chars)
+        sys.exit(1)
+
+    if args.threads > 0:
+        torch.set_num_threads(args.threads)
 
     _LOGGER.info("="*60)
     _LOGGER.info("🚀 Starting Wyoming Silero TTS Server")
@@ -141,7 +185,8 @@ async def main() -> None:
         model, model_info = load_silero_model(
             language=silero_lang,
             model_name=args.model,
-            download_path=os.path.join(os.path.dirname(__file__), "..", "silero", "model")
+            download_path=os.path.join(os.path.dirname(__file__), "..", "silero", "model"),
+            offline=args.offline,
         )
     except Exception as e:
         _LOGGER.error(f"Failed to load model: {e}")
@@ -156,21 +201,22 @@ async def main() -> None:
     speakers = resolve_speakers(model, model_info)
     if speakers:
         _LOGGER.info(f"Available speakers: {speakers}")
+        first_speaker = next((name for name in speakers if name not in HIDDEN_SPEAKERS), speakers[0])
         if args.speaker is None:
-            args.speaker = speakers[0]
+            args.speaker = first_speaker
             _LOGGER.info(f"No speaker specified, using first available: '{args.speaker}'")
         elif args.speaker not in speakers:
             _LOGGER.warning(f"Speaker '{args.speaker}' not found in model speakers: {speakers}")
-            args.speaker = speakers[0]
+            args.speaker = first_speaker
             _LOGGER.warning(f"Falling back to default speaker '{args.speaker}'")
     else:
         _LOGGER.warning("Could not determine available speakers")
 
     text_arg, speaker_arg, supports_ssml = resolve_tts_api(model)
     _LOGGER.debug("Model TTS API: text arg=%r, speaker arg=%r, SSML=%s", text_arg, speaker_arg, supports_ssml)
-    if not supports_ssml and (args.prosody_rate or args.prosody_pitch or args.break_time or args.break_strength):
+    if not supports_ssml and (args.prosody_rate or args.prosody_pitch):
         _LOGGER.warning(
-            "Model '%s' does not support SSML; the global SSML parameters will be ignored.", args.model
+            "Model '%s' does not support SSML; the global prosody parameters will be ignored.", args.model
         )
 
     supported_rates = _supported_sample_rates(model_info)
@@ -189,20 +235,27 @@ async def main() -> None:
             "Set SILERO_HA_LANGUAGE to override.", ha_language,
         )
 
+    voice_languages = {
+        speaker_name: resolve_voice_language(speaker_name, model_info, ha_language, args.ha_language)
+        for speaker_name in speakers
+    }
+
     voices_list = []
-    if speakers:
-        for speaker_name in speakers:
-            voice_language = resolve_voice_language(speaker_name, model_info, ha_language, args.ha_language)
-            voices_list.append(
-                TtsVoice(
-                    name=speaker_name,
-                    description=speaker_name,
-                    installed=True,
-                    languages=[voice_language],
-                    attribution=Attribution(name="Silero", url="https://github.com/snakers4/silero-models"),
-                    version=None,
-                )
+    for speaker_name in speakers:
+        if speaker_name in HIDDEN_SPEAKERS and speaker_name != args.speaker:
+            continue
+        voice_language = voice_languages[speaker_name]
+        voices_list.append(
+            TtsVoice(
+                name=speaker_name,
+                description=describe_voice(speaker_name, voice_language),
+                installed=True,
+                languages=[voice_language],
+                attribution=Attribution(name="Silero", url="https://github.com/snakers4/silero-models"),
+                version=None,
             )
+        )
+    if voices_list:
         _LOGGER.info(f"Advertising {len(voices_list)} voices: {[(v.name, v.languages[0]) for v in voices_list]}")
     else:
         voices_list.append(
@@ -226,11 +279,15 @@ async def main() -> None:
                 installed=True,
                 voices=voices_list,
                 version=__version__,
+                supports_synthesize_streaming=True,
             )
         ],
     )
 
     server = AsyncServer.from_uri(args.uri)
+
+    if args.zeroconf:
+        await start_zeroconf(args, ha_language)
     _LOGGER.info("="*60)
     _LOGGER.info("✅ Server ready!")
     _LOGGER.info(f"🌐 Listening on {args.uri}")
@@ -245,9 +302,38 @@ async def main() -> None:
             args.sample_rate,
             args.speaker,
             speakers,
-            ha_language
+            ha_language,
+            voice_languages,
+            asyncio.Lock(),
         )
     )
+
+
+async def start_zeroconf(args, ha_language: str) -> None:
+    """
+    Announce the server over mDNS so Home Assistant offers to add it.
+
+    Never fatal: in a Docker bridge network the announcement cannot reach
+    Home Assistant anyway, and the integration can still be added by hand.
+    """
+    parsed = urlparse(args.uri)
+    if parsed.scheme != "tcp" or parsed.port is None:
+        _LOGGER.warning("Zeroconf discovery needs a tcp:// URI, not %s; skipping", args.uri)
+        return
+
+    name = args.zeroconf_name or f"silero-{ha_language}-{parsed.port}"
+    try:
+        from wyoming.zeroconf import HomeAssistantZeroconf
+
+        zeroconf = HomeAssistantZeroconf(name=name, port=parsed.port, host=args.zeroconf_host)
+        await zeroconf.register_server()
+    except Exception as e:
+        _LOGGER.warning(
+            "Zeroconf discovery is unavailable (%s). Add the Wyoming integration in Home Assistant manually.", e
+        )
+        return
+
+    _LOGGER.info("📡 Zeroconf: announced '%s' at %s:%d", name, zeroconf.host, parsed.port)
 
 def run():
     asyncio.run(main())

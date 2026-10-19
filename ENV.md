@@ -31,6 +31,7 @@ This file documents all available environment variables for configuring Wyoming 
   - v5_1_ru: `aidar`, `baya`, `kseniya`, `eugene`, `xenia`
   - v5_cis_base: `bel_anatoliy`, `bel_dmitriy`, `bel_larisa`, etc.
 - **Example**: `SILERO_SPEAKER=kseniya`
+- **Note**: The `random` speaker of v3/v4 models (a different voice on every call) is not offered to Home Assistant, unless it is the configured default.
 
 ### SILERO_SAMPLE_RATE
 - **Description**: Audio sample rate in Hz
@@ -45,11 +46,27 @@ This file documents all available environment variables for configuring Wyoming 
 - **When to use**: Umbrella models such as `multi_v2`, `v4_cyrillic` and `v4_indic` are not single-language. By default each voice is advertised with the language taken from `models.yml` or from its name prefix (`bel_larisa` becomes `be`). Set this to force one language for every voice.
 - **Example**: `SILERO_HA_LANGUAGE=ru`
 
+### SILERO_MAX_CHARS
+- **Description**: Longest piece of text sent to the model in one call. Text is split into sentences, and sentences longer than this are cut at commas or spaces.
+- **Default**: `500`
+- **Minimum**: `50`
+- **Example**: `SILERO_MAX_CHARS=300`
+
+### SILERO_THREADS
+- **Description**: Number of CPU threads torch uses for synthesis. Requests are processed one at a time, so this is the whole CPU budget of the server.
+- **Default**: `0` (let torch decide, usually all cores)
+- **Example**: `SILERO_THREADS=4`
+
+### SILERO_OFFLINE
+- **Description**: Use the cached `models.yml` instead of downloading it on every start. The model itself is downloaded only once anyway. Without this flag, a failed download falls back to the cache after a 10 second timeout.
+- **Default**: `false`
+- **Example**: `SILERO_OFFLINE=true`
+
 ## Global SSML Configuration
 
-These parameters allow you to apply SSML prosody and break tags to all synthesized text automatically. They are optional and can be combined.
+These parameters allow you to apply prosody and a trailing pause to all synthesized text automatically. They are optional and can be combined.
 
-They require a model with SSML support (v3 and newer). On a model without it, the server logs a warning at startup and ignores them.
+The prosody settings require a model with SSML support (v3 and newer); on a model without it, the server logs a warning at startup and ignores them. The pause settings work on every model, because the pause is added as silence after the audio.
 
 ### SILERO_PROSODY_RATE
 - **Description**: Global speech rate for all synthesis
@@ -68,14 +85,14 @@ They require a model with SSML support (v3 and newer). On a model without it, th
 ### SILERO_BREAK_TIME
 - **Description**: Add a pause at the end of all synthesized text
 - **Default**: None (no pause added)
-- **Format**: Duration with unit (e.g., `500ms`, `1s`, `2s`)
+- **Format**: Duration with unit (e.g., `500ms`, `1s`, `1.5s`). An invalid value stops the server at startup.
 - **Example**: `SILERO_BREAK_TIME=1s`
 - **Note**: If both `SILERO_BREAK_TIME` and `SILERO_BREAK_STRENGTH` are set, `SILERO_BREAK_TIME` takes priority
 
 ### SILERO_BREAK_STRENGTH
 - **Description**: Add a pause with predefined strength at the end of all synthesized text
 - **Default**: None (no pause added)
-- **Options**: `x-weak`, `weak`, `medium`, `strong`, `x-strong`
+- **Options**: `none` (0), `x-weak` (100ms), `weak` (250ms), `medium` (500ms), `strong` (1s), `x-strong` (2s)
 - **Example**: `SILERO_BREAK_STRENGTH=medium`
 - **Note**: If both `SILERO_BREAK_TIME` and `SILERO_BREAK_STRENGTH` are set, `SILERO_BREAK_TIME` takes priority
 
@@ -95,6 +112,22 @@ They require a model with SSML support (v3 and newer). On a model without it, th
 - **Description**: Full URI (overrides host/port)
 - **Default**: `tcp://{host}:{port}`
 - **Example**: `WYOMING_URI=tcp://0.0.0.0:10200`
+
+### WYOMING_ZEROCONF
+- **Description**: Announce the server to Home Assistant over mDNS (`_wyoming._tcp`), so it shows up under **Discovered**
+- **Default**: `false`
+- **Note**: Works only with `network_mode: host`. In a bridge network the announcement cannot reach Home Assistant; the server keeps working and the integration is added manually. Errors while announcing are logged as warnings and never stop the server.
+- **Example**: `WYOMING_ZEROCONF=true`
+
+### WYOMING_ZEROCONF_NAME
+- **Description**: Service name announced over mDNS. Must be unique on the network.
+- **Default**: `silero-{language}-{port}`, e.g. `silero-ru-10200`
+- **Example**: `WYOMING_ZEROCONF_NAME=silero-living-room`
+
+### WYOMING_ZEROCONF_HOST
+- **Description**: IP address announced over mDNS
+- **Default**: Auto-detected from the default network interface
+- **Example**: `WYOMING_ZEROCONF_HOST=192.168.1.10`
 
 ### WYOMING_DEBUG
 - **Description**: Enable debug logging

@@ -7,3 +7,4 @@ scipy
 omegaconf
 PyYAML
 num2words
+zeroconf

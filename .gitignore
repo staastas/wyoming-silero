@@ -67,7 +67,7 @@ silero/model/
 *.log
 
 # Test files
-test_*.py
+/test_*.py
 *_test.py
 
 # Temporary files
